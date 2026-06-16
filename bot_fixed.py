@@ -587,7 +587,7 @@ async def route_choice(message: types.Message, state: FSMContext):
 
 async def main():
     logger.info("Бот запускається...")
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, handle_signals=False)
 
 if __name__ == "__main__":
     asyncio.run(main())
