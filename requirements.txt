@@ -1,0 +1,6 @@
+aiogram
+openai
+requests
+fuzzywuzzy
+python-Levenshtein
+Flask
