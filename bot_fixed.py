@@ -483,11 +483,21 @@ async def get_travel_mode(message: types.Message, state: FSMContext):
     await message.answer(get_text(uid, "analyzing"), reply_markup=ReplyKeyboardRemove())
     logger.info(f"Запит: {query}, час: {minutes} хв")
 
-    prompt = f"Ти помічник. Отримай текст: '{query}'. Поверни JSON з полем 'types' — масив типів (historical, park, church, museum, other). Якщо не вказано, ['all']. Приклад: {{\"types\":[\"historical\",\"park\"]}}"
+    prompt = f"""Ти — помічник для планування маршрутів.
+    Отримай текст запиту: '{query}'.
+    Визнач, які типи місць (historical, park, church, museum, other) згадуються в запиті.
+    Поверни ТІЛЬКИ ті типи, які явно або за змістом присутні в запиті.
+    Якщо жоден тип не згадано, поверни ['all'].
+    Відповідай тільки JSON з полем 'types'.
+    Приклади:
+    - "хочу історичні місця" → {{"types": ["historical"]}}
+    - "парк та музей" → {{"types": ["park", "museum"]}}
+    - "щось цікаве" → {{"types": ["all"]}}
+    """
     try:
         resp = openai_client.chat.completions.create(
             model="gpt-3.5-turbo",
-            messages=[{"role":"user","content":prompt}],
+            messages=[{"role": "user", "content": prompt}],
             temperature=0
         )
         ai = resp.choices[0].message.content
