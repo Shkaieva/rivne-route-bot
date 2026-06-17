@@ -198,7 +198,6 @@ def find_by_name_fuzzy(query, locations, th=70):
             res.append(loc)
     return res[:5]
 
-# ========== ГЕНЕРАЦІЯ МАРШРУТІВ (ВИПРАВЛЕНА) ==========
 def generate_variants(filtered, types_req, limit_min, travel_mode, user_lat=None, user_lon=None):
     if not filtered:
         return []
@@ -604,9 +603,15 @@ async def get_travel_mode(message: types.Message, state: FSMContext):
             combined.append(loc)
             seen.add(loc['id'])
 
-    need_acc = any(w in query.lower() for w in ['інвалід','коляск','доступн','accessible'])
+    # Фільтрація доступності з попередженням
+    need_acc = any(w in query.lower() for w in ['інвалід', 'коляск', 'доступн', 'безбар', 'accessible'])
     if need_acc:
-        combined = [loc for loc in combined if loc.get('accessibility', False)]
+        accessible_locs = [loc for loc in combined if loc.get('accessibility', False)]
+        if accessible_locs:
+            combined = accessible_locs
+        else:
+            await message.answer("⚠️ На жаль, за вашим запитом немає доступних об'єктів. Показую всі знайдені.")
+            # combined залишаємо без змін (всі об'єкти)
 
     if not combined:
         await message.answer(get_text(uid, "not_found"))
