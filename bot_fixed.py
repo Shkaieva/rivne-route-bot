@@ -65,7 +65,7 @@ TYPE_ICON = {
 translations = {
     "uk": {
         "start": "👋 Привіт! Я бот для планування маршрутів Рівним.\nНапиши, що хочеш побачити (наприклад: історичні місця та парки).",
-        "ask_location": "📍 Надішліть геолокацію або напишіть «ні» / «пропустити».",
+        "ask_location": "📍 Надішліть геолокацію або натисніть «Пропустити».",
         "ask_time": "Оберіть час з клавіатури або введіть вручну (наприклад, 2 години).",
         "thanks_location": "📍 Дякую! Тепер оберіть час.",
         "analyzing": "🤖 Аналізую запит...",
@@ -86,7 +86,7 @@ translations = {
     },
     "en": {
         "start": "👋 Hi! Plan your route in Rivne.\nTell me what you'd like to see.",
-        "ask_location": "📍 Send your location or type 'skip'.",
+        "ask_location": "📍 Send location or press 'Skip'.",
         "ask_time": "Choose time from keyboard or enter manually (e.g., 2 hours).",
         "thanks_location": "📍 Thanks! Now choose time.",
         "analyzing": "🤖 Analyzing...",
@@ -198,6 +198,7 @@ def find_by_name_fuzzy(query, locations, th=70):
             res.append(loc)
     return res[:5]
 
+# ========== ГЕНЕРАЦІЯ МАРШРУТІВ ==========
 def generate_variants(filtered, types_req, limit_min, travel_mode, user_lat=None, user_lon=None):
     if not filtered:
         return []
@@ -369,6 +370,16 @@ travel_kb = ReplyKeyboardMarkup(
     resize_keyboard=True, one_time_keyboard=True
 )
 
+# Нова клавіатура для геолокації з двома кнопками
+location_kb = ReplyKeyboardMarkup(
+    keyboard=[
+        [KeyboardButton(text="📍 Надіслати геолокацію", request_location=True)],
+        [KeyboardButton(text="⏩ Пропустити")]
+    ],
+    resize_keyboard=True,
+    one_time_keyboard=True
+)
+
 @dp.message(Command("start"))
 async def start_cmd(message: types.Message, state: FSMContext):
     await state.clear()
@@ -442,7 +453,6 @@ async def get_query(message: types.Message, state: FSMContext):
     user_lang[uid] = lang
     txt = message.text
 
-    # Видаляємо клавіатуру
     await message.answer("⏳ Обробляю запит...", reply_markup=ReplyKeyboardRemove())
 
     if txt == get_text(uid, "route_historical"):
@@ -465,33 +475,28 @@ async def get_query(message: types.Message, state: FSMContext):
         return
 
     await state.update_data(query=txt)
-    loc_kb = ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="📍 Надіслати геолокацію", request_location=True)]],
-        resize_keyboard=True, one_time_keyboard=True
-    )
-    await message.answer(get_text(uid, "ask_location"), reply_markup=loc_kb)
+    await message.answer(get_text(uid, "ask_location"), reply_markup=location_kb)
     await state.set_state(RouteStates.waiting_location)
 
 @dp.message(RouteStates.waiting_location)
 async def location_or_skip(message: types.Message, state: FSMContext):
     uid = message.from_user.id
+    
     if message.location:
         await state.update_data(user_lat=message.location.latitude, user_lon=message.location.longitude)
         await message.answer(get_text(uid, "thanks_location"), reply_markup=time_kb)
         await state.set_state(RouteStates.waiting_time)
-    else:
-        skip = message.text.lower()
-        if any(w in skip for w in ["ні", "пропустити", "skip", "no"]):
-            await state.update_data(user_lat=None, user_lon=None)
-            await message.answer("⏩ Пропускаємо геолокацію.", reply_markup=ReplyKeyboardRemove())
-            await message.answer(get_text(uid, "ask_time"), reply_markup=time_kb)
-            await state.set_state(RouteStates.waiting_time)
-        else:
-            kb = ReplyKeyboardMarkup(
-                keyboard=[[KeyboardButton(text="📍 Надіслати геолокацію", request_location=True)]],
-                resize_keyboard=True, one_time_keyboard=True
-            )
-            await message.answer("⚠️ Надішліть геолокацію або напишіть «ні» / «пропустити».", reply_markup=kb)
+        return
+    
+    if message.text == "⏩ Пропустити":
+        await state.update_data(user_lat=None, user_lon=None)
+        await message.answer("⏩ Пропускаємо геолокацію.", reply_markup=ReplyKeyboardRemove())
+        await message.answer(get_text(uid, "ask_time"), reply_markup=time_kb)
+        await state.set_state(RouteStates.waiting_time)
+        return
+    
+    # Якщо надіслано щось інше
+    await message.answer("⚠️ Будь ласка, натисніть кнопку «Надіслати геолокацію» або «Пропустити».", reply_markup=location_kb)
 
 @dp.message(RouteStates.waiting_time)
 async def get_time(message: types.Message, state: FSMContext):
@@ -603,7 +608,6 @@ async def get_travel_mode(message: types.Message, state: FSMContext):
             combined.append(loc)
             seen.add(loc['id'])
 
-    # Фільтрація доступності з попередженням
     need_acc = any(w in query.lower() for w in ['інвалід', 'коляск', 'доступн', 'безбар', 'accessible'])
     if need_acc:
         accessible_locs = [loc for loc in combined if loc.get('accessibility', False)]
@@ -611,7 +615,6 @@ async def get_travel_mode(message: types.Message, state: FSMContext):
             combined = accessible_locs
         else:
             await message.answer("⚠️ На жаль, за вашим запитом немає доступних об'єктів. Показую всі знайдені.")
-            # combined залишаємо без змін (всі об'єкти)
 
     if not combined:
         await message.answer(get_text(uid, "not_found"))
