@@ -13,19 +13,26 @@ from openai import OpenAI
 import requests
 from fuzzywuzzy import fuzz
 
-#  НАЛАШТУВАННЯ 
-import os
-
+# ---------- НАЛАШТУВАННЯ ----------
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 GOOGLE_MAPS_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 WEATHER_API_KEY = os.getenv("WEATHER_API_KEY")
 
+if not TELEGRAM_TOKEN:
+    raise ValueError("TELEGRAM_TOKEN не задано")
+if not OPENAI_API_KEY:
+    raise ValueError("OPENAI_API_KEY не задано")
+if not GOOGLE_MAPS_API_KEY:
+    raise ValueError("GOOGLE_MAPS_API_KEY не задано")
+if not WEATHER_API_KEY:
+    raise ValueError("WEATHER_API_KEY не задано")
+
 openai_client = OpenAI(api_key=OPENAI_API_KEY)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ЗАВАНТАЖЕННЯ БАЗИ З JSON 
+# ---------- ЗАВАНТАЖЕННЯ БАЗИ ----------
 LOCATIONS_FILE = "locations.json"
 
 def load_locations():
@@ -34,7 +41,6 @@ def load_locations():
     with open(LOCATIONS_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
         for loc in data:
-            #  наявність ключів
             loc.setdefault("indoor", False)
             loc.setdefault("description", "")
             loc.setdefault("hours", "")
@@ -120,7 +126,6 @@ def get_text(user_id, key):
     return translations[lang].get(key, key)
 
 def get_localized_field(loc, field, lang):
-    """Повертає локалізоване поле об'єкта (назва, опис, години, ціна)."""
     field_en = f"{field}_en"
     if lang == 'en' and loc.get(field_en):
         return loc[field_en]
@@ -193,9 +198,11 @@ def find_by_name_fuzzy(query, locations, th=70):
             res.append(loc)
     return res[:5]
 
-def generate_variants(filtered, types_req, limit_min, travel_mode, user_lat=None, user_lon=None):
+def generate_variants(filtered, types_req, limit_min, travel_mode, user_lat=None, user_lon=None, named_locs=None):
     if not filtered:
         return []
+    unlimited = limit_min >= 9999
+
     if not types_req or 'all' in types_req:
         short = sorted(filtered, key=lambda x: x['duration'])[:5]
         opt = optimize_order(short, user_lat, user_lon)
@@ -207,6 +214,97 @@ def generate_variants(filtered, types_req, limit_min, travel_mode, user_lat=None
     for t in by_type:
         by_type[t].sort(key=lambda x: x['duration'])
 
+    # ---- ЯКЩО Є КОНКРЕТНА НАЗВА ---- 
+    named_ids = {loc['id'] for loc in named_locs} if named_locs else set()
+    named_objects = [loc for loc in filtered if loc['id'] in named_ids]
+
+    # ---- ЛОГІКА ДЛЯ ОДНОГО ТИПУ ----
+    if len(types_req) == 1:
+        t = types_req[0]
+        if t not in by_type or not by_type[t]:
+            return []
+        all_locs = by_type[t]
+
+        # Відокремлюємо конкретні назви від решти
+        named_specific = [loc for loc in all_locs if loc['id'] in named_ids]
+        other_locs = [loc for loc in all_locs if loc['id'] not in named_ids]
+        other_locs.sort(key=lambda x: x['duration'])
+
+        # Якщо є конкретна назва, вона має бути в усіх варіантах
+        # Варіант 1: конкретна назва + найкоротші з решти, скільки влізе
+        var1 = named_specific.copy()
+        total1 = sum(loc['duration'] for loc in var1)
+        for loc in other_locs:
+            if unlimited or total1 + loc['duration'] <= limit_min:
+                var1.append(loc)
+                total1 += loc['duration']
+            else:
+                break
+        if not var1 and all_locs:
+            var1 = [all_locs[0]]
+
+        # Варіант 2: конкретна назва + інший набір (пропускаємо перший з інших)
+        var2 = named_specific.copy()
+        total2 = sum(loc['duration'] for loc in var2)
+        if len(other_locs) > 1:
+            for loc in other_locs[1:]:
+                if unlimited or total2 + loc['duration'] <= limit_min:
+                    var2.append(loc)
+                    total2 += loc['duration']
+                else:
+                    break
+        elif len(other_locs) == 1:
+            var2.append(other_locs[0])
+        else:
+            # якщо немає інших локацій, дублюємо конкретну
+            if var2:
+                pass
+            else:
+                var2 = [all_locs[0]]
+        if not var2:
+            var2 = var1
+
+        # Варіант 3: конкретна назва + третій набір (наприклад, тільки конкретна + ще одна)
+        var3 = named_specific.copy()
+        total3 = sum(loc['duration'] for loc in var3)
+        if len(other_locs) >= 1:
+            # беремо перший з інших
+            var3.append(other_locs[0])
+            total3 += other_locs[0]['duration']
+            # якщо влізає, додаємо ще один
+            if len(other_locs) > 1 and (unlimited or total3 + other_locs[1]['duration'] <= limit_min):
+                var3.append(other_locs[1])
+        if not var3:
+            var3 = var1
+
+        # Якщо немає конкретної назви, то просто беремо найкоротші
+        if not named_specific:
+            var1 = []
+            total1 = 0
+            for loc in other_locs:
+                if unlimited or total1 + loc['duration'] <= limit_min:
+                    var1.append(loc)
+                    total1 += loc['duration']
+                else:
+                    break
+            if not var1:
+                var1 = [all_locs[0]]
+            var2 = var1[1:] if len(var1) > 1 else var1
+            var3 = var1[:-1] if len(var1) > 1 else var1
+
+        opt1 = optimize_order(var1, user_lat, user_lon)
+        opt2 = optimize_order(var2, user_lat, user_lon)
+        opt3 = optimize_order(var3, user_lat, user_lon)
+
+        unique = []
+        for r in [opt1, opt2, opt3]:
+            if r:
+                key = tuple(loc['id'] for loc in r)
+                if key not in [tuple(loc['id'] for loc in u) for u in unique]:
+                    unique.append(r)
+        return unique[:3]
+
+    # ---- ЛОГІКА ДЛЯ КІЛЬКОХ ТИПІВ (не змінено) ----
     var1 = []
     for t in types_req:
         if t in by_type and by_type[t]:
@@ -286,7 +384,7 @@ def recommend_indoor(locations, types=None):
         indoor = [loc for loc in indoor if loc['type'] in types]
     return indoor[:3]
 
-#  ОБРОБНИКИ 
+# ---------- ОБРОБНИКИ ----------
 bot = Bot(token=TELEGRAM_TOKEN, request_timeout=60)
 dp = Dispatcher()
 
@@ -369,6 +467,8 @@ async def auto_start(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     lang = detect_language(message.text)
     user_lang[uid] = lang
+    # Скидаємо старий стан
+    await state.clear()
     await state.set_state(RouteStates.waiting_query)
     await get_query(message, state)
 
@@ -379,6 +479,7 @@ async def get_query(message: types.Message, state: FSMContext):
     user_lang[uid] = lang
     txt = message.text
 
+    # Якщо це вибір готового маршруту
     if txt == get_text(uid, "route_historical"):
         sel = [loc for loc in locations if loc['id'] in [4,5,10,14,20]]
         await state.update_data(variants=[sel])
@@ -483,6 +584,7 @@ async def get_travel_mode(message: types.Message, state: FSMContext):
     await message.answer(get_text(uid, "analyzing"), reply_markup=ReplyKeyboardRemove())
     logger.info(f"Запит: {query}, час: {minutes} хв")
 
+    # Покращений промпт
     prompt = f"""Ти — помічник для планування маршрутів.
     Отримай текст запиту: '{query}'.
     Визнач, які типи місць (historical, park, church, museum, other) згадуються в запиті.
@@ -509,6 +611,25 @@ async def get_travel_mode(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
+    # Локальний аналіз, якщо ChatGPT повернув всі типи
+    all_types_set = {'historical', 'park', 'church', 'museum', 'other'}
+    if set(types) == all_types_set or 'all' in types:
+        lower_q = query.lower()
+        detected = []
+        if any(w in lower_q for w in ['історичн', 'пам\'ятк', 'старовин', 'стародавн']):
+            detected.append('historical')
+        if any(w in lower_q for w in ['парк', 'сквер', 'гідропарк', 'зелен']):
+            detected.append('park')
+        if any(w in lower_q for w in ['церкв', 'собор', 'костел', 'храм', 'каплиц']):
+            detected.append('church')
+        if any(w in lower_q for w in ['музей', 'галере', 'театр', 'виставк', 'експозиц']):
+            detected.append('museum')
+        if any(w in lower_q for w in ['зоопарк', 'стадіон', 'пагорб', 'площа', 'пам\'ятник']):
+            detected.append('other')
+        if detected:
+            types = detected
+            logger.info(f"Локальний аналіз визначив типи: {types}")
+
     filtered_by_type = filter_by_types(locations, types)
     named = find_by_name_fuzzy(query, locations)
     combined = []
@@ -527,7 +648,8 @@ async def get_travel_mode(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    variants = generate_variants(combined, types, minutes, travel_mode, user_lat, user_lon)
+    # Передаємо named_locs у generate_variants
+    variants = generate_variants(combined, types, minutes, travel_mode, user_lat, user_lon, named_locs=named)
     if not variants:
         await message.answer(get_text(uid, "not_found"))
         await state.clear()
@@ -577,7 +699,8 @@ async def show_route(message: types.Message, state: FSMContext, selected):
     if url:
         txt += get_text(uid, "open_map").format(url=url)
     await message.answer(txt, parse_mode="Markdown")
-    await message.answer(get_text(uid, "new_route_prompt"))
+    # Після показу маршруту видаляємо клавіатуру
+    await message.answer(get_text(uid, "new_route_prompt"), reply_markup=ReplyKeyboardRemove())
     await state.clear()
 
 @dp.message(RouteStates.waiting_choice)
