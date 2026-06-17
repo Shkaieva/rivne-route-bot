@@ -32,7 +32,7 @@ openai_client = OpenAI(api_key=OPENAI_API_KEY)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# ---------- ЗАВАНТАЖЕННЯ БАЗИ ----------
+# ---------- ЗАВАНТАЖЕННЯ БАЗИ З JSON ----------
 LOCATIONS_FILE = "locations.json"
 
 def load_locations():
@@ -198,7 +198,8 @@ def find_by_name_fuzzy(query, locations, th=70):
             res.append(loc)
     return res[:5]
 
-def generate_variants(filtered, types_req, limit_min, travel_mode, user_lat=None, user_lon=None, named_locs=None):
+# ========== ВИПРАВЛЕНА ФУНКЦІЯ ГЕНЕРАЦІЇ МАРШРУТІВ ==========
+def generate_variants(filtered, types_req, limit_min, travel_mode, user_lat=None, user_lon=None):
     if not filtered:
         return []
     unlimited = limit_min >= 9999
@@ -214,88 +215,69 @@ def generate_variants(filtered, types_req, limit_min, travel_mode, user_lat=None
     for t in by_type:
         by_type[t].sort(key=lambda x: x['duration'])
 
-    # ---- ЯКЩО Є КОНКРЕТНА НАЗВА ---- 
-    named_ids = {loc['id'] for loc in named_locs} if named_locs else set()
-    named_objects = [loc for loc in filtered if loc['id'] in named_ids]
-
-    # ---- ЛОГІКА ДЛЯ ОДНОГО ТИПУ ----
+    # ---- ОКРЕМА ЛОГІКА ДЛЯ ОДНОГО ТИПУ ----
     if len(types_req) == 1:
         t = types_req[0]
         if t not in by_type or not by_type[t]:
             return []
         all_locs = by_type[t]
 
-        # Відокремлюємо конкретні назви від решти
-        named_specific = [loc for loc in all_locs if loc['id'] in named_ids]
-        other_locs = [loc for loc in all_locs if loc['id'] not in named_ids]
-        other_locs.sort(key=lambda x: x['duration'])
+        # Сортуємо за тривалістю
+        sorted_locs = sorted(all_locs, key=lambda x: x['duration'])
 
-        # Якщо є конкретна назва, вона має бути в усіх варіантах
-        # Варіант 1: конкретна назва + найкоротші з решти, скільки влізе
-        var1 = named_specific.copy()
-        total1 = sum(loc['duration'] for loc in var1)
-        for loc in other_locs:
+        # ---- Варіант 1: найкоротші, скільки влізе ----
+        var1 = []
+        total1 = 0
+        for loc in sorted_locs:
             if unlimited or total1 + loc['duration'] <= limit_min:
                 var1.append(loc)
                 total1 += loc['duration']
             else:
                 break
-        if not var1 and all_locs:
-            var1 = [all_locs[0]]
+        if not var1:
+            var1 = [sorted_locs[0]]
 
-        # Варіант 2: конкретна назва + інший набір (пропускаємо перший з інших)
-        var2 = named_specific.copy()
-        total2 = sum(loc['duration'] for loc in var2)
-        if len(other_locs) > 1:
-            for loc in other_locs[1:]:
+        # ---- Варіант 2: пропускаємо найкоротший (якщо є хоча б 2) ----
+        var2 = []
+        total2 = 0
+        if len(sorted_locs) > 1:
+            for loc in sorted_locs[1:]:
                 if unlimited or total2 + loc['duration'] <= limit_min:
                     var2.append(loc)
                     total2 += loc['duration']
                 else:
                     break
-        elif len(other_locs) == 1:
-            var2.append(other_locs[0])
-        else:
-            # якщо немає інших локацій, дублюємо конкретну
-            if var2:
+        if not var2:
+            var2 = [sorted_locs[0]] if sorted_locs else []
+
+        # ---- Варіант 3: комбінація без останнього з var1, або перший+другий ----
+        if len(var1) > 2:
+            var3 = var1[:-1]
+        elif len(var1) == 2:
+            # спробуємо взяти другий об'єкт + перший (якщо влізе)
+            var3 = [var1[1]] if var1[1] else []
+            if var3 and (unlimited or sum(loc['duration'] for loc in var3) <= limit_min):
                 pass
             else:
-                var2 = [all_locs[0]]
-        if not var2:
-            var2 = var1
+                var3 = [var1[0]]
+        else:
+            # тільки один об'єкт вліз — намагаємося додати ще один
+            if len(sorted_locs) > 1:
+                var3 = [sorted_locs[0], sorted_locs[1]]
+                if not unlimited and sum(loc['duration'] for loc in var3) > limit_min:
+                    var3 = [sorted_locs[0]]
+            else:
+                var3 = [sorted_locs[0]]
 
-        # Варіант 3: конкретна назва + третій набір (наприклад, тільки конкретна + ще одна)
-        var3 = named_specific.copy()
-        total3 = sum(loc['duration'] for loc in var3)
-        if len(other_locs) >= 1:
-            # беремо перший з інших
-            var3.append(other_locs[0])
-            total3 += other_locs[0]['duration']
-            # якщо влізає, додаємо ще один
-            if len(other_locs) > 1 and (unlimited or total3 + other_locs[1]['duration'] <= limit_min):
-                var3.append(other_locs[1])
         if not var3:
-            var3 = var1
+            var3 = [sorted_locs[0]] if sorted_locs else []
 
-        # Якщо немає конкретної назви, то просто беремо найкоротші
-        if not named_specific:
-            var1 = []
-            total1 = 0
-            for loc in other_locs:
-                if unlimited or total1 + loc['duration'] <= limit_min:
-                    var1.append(loc)
-                    total1 += loc['duration']
-                else:
-                    break
-            if not var1:
-                var1 = [all_locs[0]]
-            var2 = var1[1:] if len(var1) > 1 else var1
-            var3 = var1[:-1] if len(var1) > 1 else var1
-
+        # Оптимізуємо
         opt1 = optimize_order(var1, user_lat, user_lon)
         opt2 = optimize_order(var2, user_lat, user_lon)
         opt3 = optimize_order(var3, user_lat, user_lon)
 
+        # Унікальні
         unique = []
         for r in [opt1, opt2, opt3]:
             if r:
@@ -304,7 +286,7 @@ def generate_variants(filtered, types_req, limit_min, travel_mode, user_lat=None
                     unique.append(r)
         return unique[:3]
 
-    # ---- ЛОГІКА ДЛЯ КІЛЬКОХ ТИПІВ (не змінено) ----
+    # ---- ДЛЯ ДВОХ І БІЛЬШЕ ТИПІВ (стара логіка, але з перевіркою часу) ----
     var1 = []
     for t in types_req:
         if t in by_type and by_type[t]:
@@ -324,28 +306,23 @@ def generate_variants(filtered, types_req, limit_min, travel_mode, user_lat=None
     if not var3 and filtered:
         var3 = [min(filtered, key=lambda x: x['duration'])]
 
-    for v in [var1, var2, var3]:
-        if len(v) > 5:
-            v[:] = v[:5]
-
     results = []
     for v in [var1, var2, var3]:
         if not v:
             continue
+        total = sum(loc['duration'] for loc in v)
+        # Якщо перевищує ліміт — скорочуємо до 1 об'єкта
+        if not unlimited and total > limit_min:
+            v = [min(v, key=lambda x: x['duration'])]
         v_opt = optimize_order(v, user_lat, user_lon)
-        total = total_time_with_travel(v_opt, travel_mode, user_lat, user_lon)
-        if limit_min < 9999 and total > limit_min * 1.2:
-            v_sorted = sorted(v_opt, key=lambda x: x['duration'], reverse=True)
-            while len(v_sorted) > 1 and total_time_with_travel(v_sorted, travel_mode, user_lat, user_lon) > limit_min * 1.2:
-                v_sorted.pop()
-            v_opt = optimize_order(v_sorted, user_lat, user_lon)
         results.append(v_opt)
 
     unique = []
     for r in results:
-        key = tuple(loc['id'] for loc in r)
-        if key not in [tuple(loc['id'] for loc in u) for u in unique]:
-            unique.append(r)
+        if r:
+            key = tuple(loc['id'] for loc in r)
+            if key not in [tuple(loc['id'] for loc in u) for u in unique]:
+                unique.append(r)
     return unique[:3]
 
 def build_google_maps_url(route, user_lat=None, user_lon=None, travel="walking"):
@@ -467,8 +444,6 @@ async def auto_start(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     lang = detect_language(message.text)
     user_lang[uid] = lang
-    # Скидаємо старий стан
-    await state.clear()
     await state.set_state(RouteStates.waiting_query)
     await get_query(message, state)
 
@@ -479,7 +454,6 @@ async def get_query(message: types.Message, state: FSMContext):
     user_lang[uid] = lang
     txt = message.text
 
-    # Якщо це вибір готового маршруту
     if txt == get_text(uid, "route_historical"):
         sel = [loc for loc in locations if loc['id'] in [4,5,10,14,20]]
         await state.update_data(variants=[sel])
@@ -584,7 +558,6 @@ async def get_travel_mode(message: types.Message, state: FSMContext):
     await message.answer(get_text(uid, "analyzing"), reply_markup=ReplyKeyboardRemove())
     logger.info(f"Запит: {query}, час: {minutes} хв")
 
-    # Покращений промпт
     prompt = f"""Ти — помічник для планування маршрутів.
     Отримай текст запиту: '{query}'.
     Визнач, які типи місць (historical, park, church, museum, other) згадуються в запиті.
@@ -648,8 +621,7 @@ async def get_travel_mode(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    # Передаємо named_locs у generate_variants
-    variants = generate_variants(combined, types, minutes, travel_mode, user_lat, user_lon, named_locs=named)
+    variants = generate_variants(combined, types, minutes, travel_mode, user_lat, user_lon)
     if not variants:
         await message.answer(get_text(uid, "not_found"))
         await state.clear()
@@ -699,7 +671,6 @@ async def show_route(message: types.Message, state: FSMContext, selected):
     if url:
         txt += get_text(uid, "open_map").format(url=url)
     await message.answer(txt, parse_mode="Markdown")
-    # Після показу маршруту видаляємо клавіатуру
     await message.answer(get_text(uid, "new_route_prompt"), reply_markup=ReplyKeyboardRemove())
     await state.clear()
 
