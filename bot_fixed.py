@@ -66,7 +66,7 @@ translations = {
     "uk": {
         "start": "👋 Привіт! Я бот для планування маршрутів Рівним.\nНапиши, що хочеш побачити (наприклад: історичні місця та парки).",
         "ask_location": "📍 Надішліть геолокацію або напишіть «ні» / «пропустити».",
-        "ask_time": "Оберіть час з клавіатури або введіть вручну (2 години).",
+        "ask_time": "Оберіть час з клавіатури або введіть вручну (наприклад, 2 години).",
         "thanks_location": "📍 Дякую! Тепер оберіть час.",
         "analyzing": "🤖 Аналізую запит...",
         "error_openai": "Помилка аналізу. Спробуйте простіше.",
@@ -87,7 +87,7 @@ translations = {
     "en": {
         "start": "👋 Hi! Plan your route in Rivne.\nTell me what you'd like to see.",
         "ask_location": "📍 Send your location or type 'skip'.",
-        "ask_time": "Choose time from keyboard or enter manually.",
+        "ask_time": "Choose time from keyboard or enter manually (e.g., 2 hours).",
         "thanks_location": "📍 Thanks! Now choose time.",
         "analyzing": "🤖 Analyzing...",
         "error_openai": "Analysis error. Try a simpler query.",
@@ -198,7 +198,7 @@ def find_by_name_fuzzy(query, locations, th=70):
             res.append(loc)
     return res[:5]
 
-# ========== ВИПРАВЛЕНА ФУНКЦІЯ ГЕНЕРАЦІЇ МАРШРУТІВ ==========
+# ========== ГЕНЕРАЦІЯ МАРШРУТІВ (ВИПРАВЛЕНА) ==========
 def generate_variants(filtered, types_req, limit_min, travel_mode, user_lat=None, user_lon=None):
     if not filtered:
         return []
@@ -222,10 +222,9 @@ def generate_variants(filtered, types_req, limit_min, travel_mode, user_lat=None
             return []
         all_locs = by_type[t]
 
-        # Сортуємо за тривалістю
         sorted_locs = sorted(all_locs, key=lambda x: x['duration'])
 
-        # ---- Варіант 1: найкоротші, скільки влізе ----
+        # Варіант 1: найкоротші, скільки влізе
         var1 = []
         total1 = 0
         for loc in sorted_locs:
@@ -237,7 +236,7 @@ def generate_variants(filtered, types_req, limit_min, travel_mode, user_lat=None
         if not var1:
             var1 = [sorted_locs[0]]
 
-        # ---- Варіант 2: пропускаємо найкоротший (якщо є хоча б 2) ----
+        # Варіант 2: пропускаємо найкоротший
         var2 = []
         total2 = 0
         if len(sorted_locs) > 1:
@@ -250,34 +249,25 @@ def generate_variants(filtered, types_req, limit_min, travel_mode, user_lat=None
         if not var2:
             var2 = [sorted_locs[0]] if sorted_locs else []
 
-        # ---- Варіант 3: комбінація без останнього з var1, або перший+другий ----
+        # Варіант 3: комбінація (різні варіанти)
         if len(var1) > 2:
             var3 = var1[:-1]
         elif len(var1) == 2:
-            # спробуємо взяти другий об'єкт + перший (якщо влізе)
-            var3 = [var1[1]] if var1[1] else []
-            if var3 and (unlimited or sum(loc['duration'] for loc in var3) <= limit_min):
-                pass
-            else:
-                var3 = [var1[0]]
+            var3 = [var1[1]] if var1[1] else [var1[0]]
         else:
-            # тільки один об'єкт вліз — намагаємося додати ще один
             if len(sorted_locs) > 1:
                 var3 = [sorted_locs[0], sorted_locs[1]]
                 if not unlimited and sum(loc['duration'] for loc in var3) > limit_min:
                     var3 = [sorted_locs[0]]
             else:
                 var3 = [sorted_locs[0]]
-
         if not var3:
             var3 = [sorted_locs[0]] if sorted_locs else []
 
-        # Оптимізуємо
         opt1 = optimize_order(var1, user_lat, user_lon)
         opt2 = optimize_order(var2, user_lat, user_lon)
         opt3 = optimize_order(var3, user_lat, user_lon)
 
-        # Унікальні
         unique = []
         for r in [opt1, opt2, opt3]:
             if r:
@@ -286,7 +276,7 @@ def generate_variants(filtered, types_req, limit_min, travel_mode, user_lat=None
                     unique.append(r)
         return unique[:3]
 
-    # ---- ДЛЯ ДВОХ І БІЛЬШЕ ТИПІВ (стара логіка, але з перевіркою часу) ----
+    # ---- ДЛЯ ДВОХ І БІЛЬШЕ ТИПІВ ----
     var1 = []
     for t in types_req:
         if t in by_type and by_type[t]:
@@ -311,7 +301,6 @@ def generate_variants(filtered, types_req, limit_min, travel_mode, user_lat=None
         if not v:
             continue
         total = sum(loc['duration'] for loc in v)
-        # Якщо перевищує ліміт — скорочуємо до 1 об'єкта
         if not unlimited and total > limit_min:
             v = [min(v, key=lambda x: x['duration'])]
         v_opt = optimize_order(v, user_lat, user_lon)
@@ -385,7 +374,7 @@ travel_kb = ReplyKeyboardMarkup(
 async def start_cmd(message: types.Message, state: FSMContext):
     await state.clear()
     uid = message.from_user.id
-    await message.answer(get_text(uid, "start"))
+    await message.answer(get_text(uid, "start"), reply_markup=ReplyKeyboardRemove())
     await state.set_state(RouteStates.waiting_query)
 
 @dp.message(Command("cancel"))
@@ -454,22 +443,25 @@ async def get_query(message: types.Message, state: FSMContext):
     user_lang[uid] = lang
     txt = message.text
 
+    # Видаляємо клавіатуру
+    await message.answer("⏳ Обробляю запит...", reply_markup=ReplyKeyboardRemove())
+
     if txt == get_text(uid, "route_historical"):
         sel = [loc for loc in locations if loc['id'] in [4,5,10,14,20]]
         await state.update_data(variants=[sel])
-        await message.answer("✅ Готовий маршрут 'Історичний центр'", reply_markup=ReplyKeyboardRemove())
+        await message.answer("✅ Готовий маршрут 'Історичний центр'")
         await show_route(message, state, sel)
         return
     elif txt == get_text(uid, "route_parks"):
         sel = [loc for loc in locations if loc['id'] in [3,15,16]]
         await state.update_data(variants=[sel])
-        await message.answer("✅ Готовий маршрут 'Парки та відпочинок'", reply_markup=ReplyKeyboardRemove())
+        await message.answer("✅ Готовий маршрут 'Парки та відпочинок'")
         await show_route(message, state, sel)
         return
     elif txt == get_text(uid, "route_museums"):
         sel = [loc for loc in locations if loc['id'] in [6,26,27]]
         await state.update_data(variants=[sel])
-        await message.answer("✅ Готовий маршрут 'Музеї та культура'", reply_markup=ReplyKeyboardRemove())
+        await message.answer("✅ Готовий маршрут 'Музеї та культура'")
         await show_route(message, state, sel)
         return
 
@@ -584,7 +576,7 @@ async def get_travel_mode(message: types.Message, state: FSMContext):
         await state.clear()
         return
 
-    # Локальний аналіз, якщо ChatGPT повернув всі типи
+    # Локальний аналіз
     all_types_set = {'historical', 'park', 'church', 'museum', 'other'}
     if set(types) == all_types_set or 'all' in types:
         lower_q = query.lower()
@@ -679,6 +671,10 @@ async def route_choice(message: types.Message, state: FSMContext):
     uid = message.from_user.id
     data = await state.get_data()
     variants = data.get('variants', [])
+    if not variants:
+        await message.answer("⚠️ Будь ласка, почніть новий запит командою /start або напишіть, що хочете побачити.", reply_markup=ReplyKeyboardRemove())
+        await state.clear()
+        return
     try:
         idx = int(message.text.split()[-1]) - 1
         if idx < 0 or idx >= len(variants):
